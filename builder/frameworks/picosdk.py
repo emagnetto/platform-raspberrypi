@@ -328,11 +328,6 @@ if not "PICO_DEFAULT_BOOT_STAGE2_FILE" in cpp_defines:
     pass
 if not "PICO_DEFAULT_BOOT_STAGE2" in cpp_defines:
     pass
-if not "PIO_NO_STDIO_UART" in cpp_defines:
-    flags.append(("PICO_STDIO_UART", 1))
-    # SDK C code specifies it as LIB_... so do that too
-    flags.append(("LIB_PICO_STDIO", 1))
-    flags.append(("LIB_PICO_STDIO_UART", 1))
 if not "PIO_NO_MULTICORE" in cpp_defines:
     flags.append(("PICO_MULTICORE_ENABLED", 1))
 # check selected double implementation
@@ -365,7 +360,10 @@ flags.append(("PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS", timeout))
 
 # default to USB stdio if nothing else defined (or explicitly disabled)
 if not any(str(flag).startswith("PIO_STDIO") for flag in cpp_defines) and "PIO_STDIO_NONE" not in cpp_defines:
+    print("No stdio implementation defined, defaulting to USB.")
     cpp_defines.append("PIO_STDIO_USB")
+
+is_cyw43_board = any(str(flag).startswith("PICO_CYW43_SUPPORTED") for flag in cpp_defines)
 
 def build_double_library():
     pass
@@ -412,7 +410,8 @@ def configure_printf_impl():
     for key in remap_dict:
         if key in cpp_defines:
             flags.append(remap_dict[key])
-
+            if "LIB_PICO_STDIO" not in flags:
+                flags.append("LIB_PICO_STDIO")
     # we definitely need tinyusb for this
     if "LIB_PICO_STDIO_USB" in flags:
         build_tinyusb()
@@ -425,10 +424,71 @@ def configure_printf_impl():
         new_defines = [d for d in new_defines if not (isinstance(d, tuple) and d[0] == "USBD_MAX_POWER_MA")]
         env.Replace(CPPDEFINES=new_defines)
 
+def build_cyw43_arch():
+    # not needed for non-CYW43 boards
+    if not is_cyw43_board:
+        return
+    env.Append(CPPPATH=[
+        join(FRAMEWORK_DIR, "src", "rp2_common", "pico_cyw43_arch", "include"),
+        join(FRAMEWORK_DIR, "src", "rp2_common", "pico_cyw43_driver", "include"),
+        join(FRAMEWORK_DIR, "lib", "btstack", "src"),
+        join(FRAMEWORK_DIR, "lib", "btstack", "platform", "embedded"),
+        join(FRAMEWORK_DIR, "lib", "cyw43-driver", "src"),
+        join(FRAMEWORK_DIR, "lib", "cyw43-driver", "firmware"),
+        join(FRAMEWORK_DIR, "lib", "lwip", "src", "include"),
+        # has lwipopts.h
+        join(FRAMEWORK_DIR, "lib", "btstack", "platform", "lwip", "port")
+    ], CPPDEFINES=[
+        ("PICO_CYW43_ARCH_THREADSAFE_BACKGROUND", "1"),
+    ])
+    # build pico_cyw43_arch
+    env.BuildSources(
+        join("$BUILD_DIR", "PicoSDKCyw43Arch"),
+        join(FRAMEWORK_DIR, "src", "rp2_common", "pico_cyw43_arch"),
+        "-<*> +<cyw43_arch.c> +<cyw43_arch_threadsafe_background.c>"
+    )
+    # build rp2_common/pico_async_context
+    env.BuildSources(
+        join("$BUILD_DIR", "PicoSDKAsyncContext"),
+        join(FRAMEWORK_DIR, "src", "rp2_common", "pico_async_context"),
+        "-<*> +<async_context_base.c> +<async_context_threadsafe_background.c>"
+    )
+    # build pico_cyw43_driver, has .pio file
+    comp_build_dir = join("$BUILD_DIR", "PicoSDKPicoCYW43Driver")
+    comp_src_dir = join(FRAMEWORK_DIR, "src", "rp2_common", "pico_cyw43_driver")
+    src_filter = "+<*.c> -<*.S> -<*.s> -<btstack_cyw43.c> -<btstack_hci_transport_cyw43.c>" # only needed if btstack is on
+    pio_headers = preprocess_pio_sources(comp_src_dir)
+    c_nodes = env.BuildSources(comp_build_dir, comp_src_dir, src_filter)
+    env.Depends(c_nodes, pio_headers)
+
+    # build lib/cyw43-driver, regularly.
+    env.BuildSources(
+        join("$BUILD_DIR", "Cyw43Driver"),
+        join(FRAMEWORK_DIR, "lib", "cyw43-driver", "src"),
+        "+<*> -<*.S> -<*.s> -<cyw43_spi.c>" # already provided by more specialized cyw43_bus_pio_spi.c
+    )
+
+    # build rp2_common / pico_lwip
+    env.BuildSources(
+        join("$BUILD_DIR", "PicoSDKLwip"),
+        join(FRAMEWORK_DIR, "src", "rp2_common", "pico_lwip"),
+        "-<*> +<lwip_nosys.c>"
+    )
+
+    # build lib/lwip.
+    lwip_src_filter = "-<*> +<api> +<core> +<port> +<netif/ethernet.c>"
+    env.BuildSources(
+        join("$BUILD_DIR", "Lwip"),
+        join(FRAMEWORK_DIR, "lib", "lwip", "src"),
+        lwip_src_filter
+    )
+
+
 build_double_library()
 build_float_library()
 build_divider_library()
 configure_printf_impl()
+build_cyw43_arch()
 
 # default false, only mentioned here:
 # PICO_CXX_ENABLE_EXCEPTIONS
@@ -456,6 +516,13 @@ else:
     # when calling into the RP2040 version of that script, it actually doesn't take a "-a" argument at all.
     pad_checksum_arch = ""
 
+current_defines = []
+for x in env["CPPDEFINES"]:
+    # can be a tuple (key, value) or just a key
+    if isinstance(x, tuple):
+        current_defines.append(f"-D{x[0]}={str(x[1])}")
+    else:
+        current_defines.append(f"-D{x}")
 gen_boot2_cmd = env.Command(
     join("$BUILD_DIR", "boot2.S"),  # $TARGET
     join(FRAMEWORK_DIR, "src", mcu, "boot_stage2", "compile_time_choice.S"),  # $SOURCE
@@ -465,7 +532,7 @@ gen_boot2_cmd = env.Command(
         #"$ASFLAGS",
         #"$CCFLAGS",
     ] 
-    + ["-D%s=%s" % (flag[0], str(flag[1])) for flag in env["CPPDEFINES"]] 
+    + current_defines
     + [
         "-I\"%s\"" % join(FRAMEWORK_DIR, "src", mcu, "boot_stage2", "asminclude"),
         "-I\"%s\"" % join(FRAMEWORK_DIR, "src", mcu, "boot_stage2", "include"),
@@ -542,15 +609,21 @@ default_common_rp2_components = [
     ("pico_runtime_init", "+<*>"),
     ("pico_runtime", "+<*>"),
     ("pico_status_led", "+<*>"),
-    ("pico_stdio_rtt", "+<*>"),
-    ("pico_stdio_semihosting", "+<*>"),
-    ("pico_stdio_uart", "+<*>"),
-    ("pico_stdio_usb", "+<*>"),
     ("pico_stdio", "+<*>"),
     ("pico_stdlib", "+<*>"),
     ("pico_standard_binary_info", "+<*>"),
     ("pico_unique_id", "+<*>"),
 ]
+
+# multiple stdio implementations can be on at the same time!
+if "LIB_PICO_STDIO_USB" in flags:
+    default_common_rp2_components.append(("pico_stdio_usb", "+<*>"))
+if "LIB_PICO_STDIO_UART" in flags:
+    default_common_rp2_components.append(("pico_stdio_uart", "+<*>"))
+if "LIB_PICO_STDIO_SEMIHOSTING" in flags:
+    default_common_rp2_components.append(("pico_stdio_semihosting", "+<*>"))
+if "LIB_PICO_STDIO_RTT" in flags:
+    default_common_rp2_components.append(("pico_stdio_rtt", "+<*>"))
 
 if is_rp2350:
     default_common_rp2_components.extend(

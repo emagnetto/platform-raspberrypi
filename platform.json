@@ -18,7 +18,7 @@
     "type": "git",
     "url": "https://github.com/platformio/platform-raspberrypi.git"
   },
-  "version": "1.18.0",
+  "version": "1.19.0",
   "frameworks": {
     "arduino": {
       "package": "framework-arduino-mbed",
@@ -58,13 +58,13 @@
       "type": "framework",
       "optional": true,
       "owner": "platformio",
-      "version": "~4.4.1"
+      "version": "~4.5.0"
     },
     "framework-arduinopico": {
       "type": "framework",
       "optional": true,
       "owner": "earlephilhower",
-      "version": "https://github.com/earlephilhower/arduino-pico.git#dbe103cdc6031224c0b937233f072a6162895021"
+      "version": "https://github.com/earlephilhower/arduino-pico.git#275e73d13e5248418e13507d3988ebbf785cff36"
     },
     "framework-picosdk": {
       "type": "framework",
