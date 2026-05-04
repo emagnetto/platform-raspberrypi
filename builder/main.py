@@ -51,6 +51,9 @@ def convert_size_expression_to_int(expression):
     number *= conversion_factors[factor.upper()]
     return int(number)
 
+def option_is_true(value):
+    return str(value).strip().lower() in ("1", "yes", "true", "on", "y")
+    
 def fetch_fs_size(env):
     if "FS_START" in env:
         return
@@ -64,13 +67,99 @@ def fetch_fs_size(env):
     filesystem_size_int = convert_size_expression_to_int(filesystem_size)
     # last 4K are allocated for EEPROM emulation in flash.
     # see https://github.com/earlephilhower/arduino-pico/blob/3414b73172d307e9dc901f7fee83b41112f73457/libraries/EEPROM/EEPROM.cpp#L43-L46
-    eeprom_size = 4096
+    #eeprom_size = 4096
+    #maximum_sketch_size = flash_size - eeprom_size - filesystem_size_int
+      # EEPROM emulation reserve at the end of flash.
+    #
+    # Old behavior:
+    #   board_build.eeprom_transactional = false
+    #   physical EEPROM reserve = 4096 bytes
+    #
+    # Transactional behavior:
+    #   board_build.eeprom_transactional = true
+    #   logical EEPROM payload defaults to 16384 bytes
+    #   physical reserve defaults to:
+    #       2 * (4096 metadata sector + logical payload)
+    #
+    # For 16 KB logical transactional EEPROM:
+    #   physical reserve = 2 * (4096 + 16384) = 40960 bytes
+    eeprom_transactional = option_is_true(
+        board.get("build.eeprom_transactional", "false")
+    )
+
+    if eeprom_transactional:
+        eeprom_logical_size_expr = board.get("build.eeprom_logical_size", "16KB")
+        eeprom_logical_size = convert_size_expression_to_int(
+            str(eeprom_logical_size_expr)
+        )
+
+        if eeprom_logical_size <= 0:
+            sys.stderr.write(
+                "Error: build.eeprom_logical_size must be greater than zero. "
+                "Current value is '%s'.\n" % str(eeprom_logical_size_expr)
+            )
+            sys.stderr.flush()
+            env.Exit(1)
+
+        if eeprom_logical_size % 256 != 0:
+            sys.stderr.write(
+                "Error: build.eeprom_logical_size must be a multiple of 256 bytes. "
+                "Current value is '%s' = %d bytes.\n" %
+                (str(eeprom_logical_size_expr), eeprom_logical_size)
+            )
+            sys.stderr.flush()
+            env.Exit(1)
+
+        default_physical_size = 2 * (4096 + eeprom_logical_size)
+        eeprom_size_expr = board.get("build.eeprom_size", str(default_physical_size))
+        eeprom_size = convert_size_expression_to_int(str(eeprom_size_expr))
+
+        minimum_physical_size = 2 * (4096 + eeprom_logical_size)
+        if eeprom_size < minimum_physical_size:
+            sys.stderr.write(
+                "Error: transactional EEPROM physical reserve too small. "
+                "Need at least %d bytes, got %d bytes. "
+                "Set board_build.eeprom_size = %d or larger.\n" %
+                (minimum_physical_size, eeprom_size, minimum_physical_size)
+            )
+            sys.stderr.flush()
+            env.Exit(1)
+
+        if eeprom_size % 4096 != 0:
+            sys.stderr.write(
+                "Error: transactional EEPROM physical reserve must be a "
+                "multiple of 4096 bytes. Current value is '%s' = %d bytes.\n" %
+                (str(eeprom_size_expr), eeprom_size)
+            )
+            sys.stderr.flush()
+            env.Exit(1)
+
+        env.Append(CPPDEFINES=[
+            ("EEPROM_TRANSACTIONAL", 1),
+            ("EEPROM_EMULATION_SIZE", eeprom_logical_size),
+            ("EEPROM_PHYSICAL_SIZE", eeprom_size),
+        ])
+
+    else:
+        # Exact legacy Earle behavior: final 4 KB sector reserved for EEPROM.
+        eeprom_size = 4096
+        eeprom_logical_size = 4096
+
+        env.Append(CPPDEFINES=[
+            ("EEPROM_TRANSACTIONAL", 0),
+            ("EEPROM_EMULATION_SIZE", eeprom_logical_size),
+            ("EEPROM_PHYSICAL_SIZE", eeprom_size),
+        ])
 
     maximum_sketch_size = flash_size - eeprom_size - filesystem_size_int
 
     print("Flash size: %.2fMB" % (flash_size / 1024.0 / 1024.0))
     print("Sketch size: %.2fMB" % (maximum_sketch_size / 1024.0 / 1024.0))
     print("Filesystem size: %.2fMB" % (filesystem_size_int / 1024.0 / 1024.0))
+    print("EEPROM mode: %s" % ("transactional" if eeprom_transactional else "legacy"))
+    print("EEPROM logical size: %.2fKB" % (eeprom_logical_size / 1024.0))
+    print("EEPROM physical reserve: %.2fKB" % (eeprom_size / 1024.0))
+    
     # Just informational
     psram_len = convert_size_expression_to_int(str(board.get("upload.psram_length", "0")))
     print("PSRAM size: %.2fMB" % (psram_len / 1024.0 / 1024.0))
@@ -81,10 +170,11 @@ def fetch_fs_size(env):
 
     if maximum_sketch_size <= 0:
         sys.stderr.write(
-            "Error: Filesystem too large for given flash. "
-            "Can at max be flash size - 4096 bytes. "
-            "Available sketch size with current "
-            "config would be %d bytes.\n" % maximum_sketch_size)
+            "Error: Filesystem + EEPROM reserve too large for given flash. "
+            "Available sketch size with current config would be %d bytes. "
+            "Flash=%d bytes, filesystem=%d bytes, EEPROM reserve=%d bytes.\n" %
+            (maximum_sketch_size, flash_size, filesystem_size_int, eeprom_size)
+        )
         sys.stderr.flush()
         env.Exit(1)
 
