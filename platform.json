@@ -64,7 +64,7 @@
       "type": "framework",
       "optional": true,
       "owner": "earlephilhower",
-      "version": "https://github.com/earlephilhower/arduino-pico.git#0bcd162ad6c9173544cc37c6a1b63de19239e359"
+      "version": "https://github.com/earlephilhower/arduino-pico.git#f2c199789fda2f68eead6ecf5fd0ebb7940b90d9"
     },
     "framework-picosdk": {
       "type": "framework",
@@ -76,7 +76,7 @@
       "type": "framework",
       "optional": true,
       "owner": "mbed-ce-project",
-      "version": ">=6.99.4"
+      "version": ">=7.0.100"
     },
     "tool-picotool-rp2040-earlephilhower": {
       "type": "uploader",
